@@ -7,8 +7,6 @@ from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
 
-import geoip2.database
-import geoip2.errors
 from fastapi import Cookie, Depends, FastAPI, Form, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -38,41 +36,15 @@ def is_bot(user_agent: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# GeoIP
+# Geo lookup (Cloudflare)
 # ---------------------------------------------------------------------------
 
-GEOIP_DB_PATH = Path(__file__).parent / "data" / "dbip-country.mmdb"
-_geoip_reader: geoip2.database.Reader | None = None
-
-
-def get_geoip_reader() -> geoip2.database.Reader | None:
-    global _geoip_reader
-    if _geoip_reader is None and GEOIP_DB_PATH.exists():
-        _geoip_reader = geoip2.database.Reader(str(GEOIP_DB_PATH))
-    return _geoip_reader
-
-
-def lookup_country_from_ip(ip: str) -> str | None:
-    """Return 2-letter country code for IP using local DB, or None if unknown."""
-    reader = get_geoip_reader()
-    if not reader:
-        return None
-    try:
-        resp = reader.country(ip)
-        return resp.country.iso_code
-    except (geoip2.errors.AddressNotFoundError, ValueError):
-        return None
-
-
 def get_country(request: Request) -> str | None:
-    """Get country code, preferring Cloudflare header over local lookup."""
-    # Cloudflare provides country at the edge - most reliable
+    """Get country code from Cloudflare header."""
     cf_country = request.headers.get("cf-ipcountry")
     if cf_country and cf_country != "XX":  # XX = unknown in CF
         return cf_country
-    # Fallback to local DB lookup for direct connections
-    ip = get_real_ip(request)
-    return lookup_country_from_ip(ip)
+    return None
 
 # ---------------------------------------------------------------------------
 # Settings

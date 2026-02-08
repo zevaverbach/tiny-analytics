@@ -5,4 +5,3 @@ tinytrack.db
 .venv/
 *.egg-info/
 dist/
-data/
