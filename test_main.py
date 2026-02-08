@@ -42,7 +42,7 @@ def _row_count():
 class TestTracking:
     def test_records_pageview(self):
         resp = _send_hit()
-        assert resp.status_code == 204
+        assert resp.status_code == 200  # Now returns JSON with row ID
         assert _row_count() == 1
 
     def test_multiple_hits(self):
@@ -102,11 +102,11 @@ class TestOriginValidation:
 
     def test_accepts_correct_origin(self):
         resp = _send_hit(origin="https://allowed.com")
-        assert resp.status_code == 204
+        assert resp.status_code == 200  # Now returns JSON with row ID
 
     def test_referer_fallback(self):
         resp = _send_hit(referer="https://allowed.com/some/deep/page")
-        assert resp.status_code == 204
+        assert resp.status_code == 200  # Now returns JSON with row ID
 
     def test_nothing_stored_on_reject(self):
         _send_hit(origin="https://evil.com")
@@ -115,7 +115,7 @@ class TestOriginValidation:
     def test_open_when_no_origins_configured(self):
         settings.tinytrack_allowed_origins = []
         resp = _send_hit()
-        assert resp.status_code == 204
+        assert resp.status_code == 200  # Now returns JSON with row ID
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +199,7 @@ class TestDashboard:
 
     def test_contains_chart(self):
         resp = client.get("/", cookies=_auth_cookies())
-        assert "chart.js" in resp.text.lower() or "Chart(" in resp.text
+        assert "echarts" in resp.text.lower()
 
     def test_contains_snippet_embed_instructions(self):
         resp = client.get("/", cookies=_auth_cookies())
