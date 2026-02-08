@@ -2,7 +2,7 @@ import hashlib
 
 from fastapi.testclient import TestClient
 
-from tinytrack.app import app, get_db, settings, signer
+from tiny_analytics.app import app, get_db, settings, signer
 
 
 client = TestClient(app)
@@ -24,7 +24,7 @@ def _send_hit(url="https://example.com/page", origin=None, referer=None, user_ag
 
 
 def _auth_cookies():
-    resp = client.post("/login", data={"password": settings.tinytrack_password}, follow_redirects=False)
+    resp = client.post("/login", data={"password": settings.password}, follow_redirects=False)
     return {"tt_session": resp.cookies["tt_session"]}
 
 
@@ -90,7 +90,7 @@ class TestTracking:
 
 class TestOriginValidation:
     def setup_method(self):
-        settings.tinytrack_allowed_origins = ["https://allowed.com"]
+        settings.allowed_origins = ["https://allowed.com"]
 
     def test_rejects_no_origin(self):
         resp = _send_hit()
@@ -113,7 +113,7 @@ class TestOriginValidation:
         assert _row_count() == 0
 
     def test_open_when_no_origins_configured(self):
-        settings.tinytrack_allowed_origins = []
+        settings.allowed_origins = []
         resp = _send_hit()
         assert resp.status_code == 200  # Now returns JSON with row ID
 
@@ -158,7 +158,7 @@ class TestAuth:
         assert 'type="password"' in resp.text
 
     def test_login_correct_password(self):
-        resp = client.post("/login", data={"password": settings.tinytrack_password}, follow_redirects=False)
+        resp = client.post("/login", data={"password": settings.password}, follow_redirects=False)
         assert resp.status_code == 303
         assert resp.headers["location"] == "/"
         assert "tt_session" in resp.cookies

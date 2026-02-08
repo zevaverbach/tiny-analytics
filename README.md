@@ -1,4 +1,4 @@
-# tinytrack
+# tiny-analytics
 
 Minimal, privacy-focused web analytics. Self-hosted, no cookies, no tracking IDs.
 
@@ -8,19 +8,19 @@ Minimal, privacy-focused web analytics. Self-hosted, no cookies, no tracking IDs
 
 ```bash
 # Install
-uv tool install tinytrack
+uv tool install tiny-analytics
 
 # Configure (create a .env file or set environment variables)
-export TINYTRACK_PASSWORD="your-secret-password"
-export TINYTRACK_SECRET_KEY="$(openssl rand -hex 32)"
+export TINY_ANALYTICS_PASSWORD="your-secret-password"
+export TINY_ANALYTICS_SECRET_KEY="$(openssl rand -hex 32)"
 
 # Run
-tinytrack
+tiny-analytics
 ```
 
 Add this to your site:
 ```html
-<script src="https://your-tinytrack-domain/snippet.js" defer></script>
+<script src="https://your-analytics-domain/snippet.js" defer></script>
 ```
 
 That's it. View your dashboard at `http://localhost:8000/`.
@@ -28,33 +28,33 @@ That's it. View your dashboard at `http://localhost:8000/`.
 ### One-liner (no install)
 
 ```bash
-uvx tinytrack
+uvx tiny-analytics
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/zevaverbach/tinytrack.git
-cd tinytrack
+git clone https://github.com/zevaverbach/tiny-analytics.git
+cd tiny-analytics
 uv sync
-uv run tinytrack
+uv run tiny-analytics
 ```
 
 <details>
 <summary>Using pip instead of uv</summary>
 
 ```bash
-pip install tinytrack
-tinytrack
+pip install tiny-analytics
+tiny-analytics
 ```
 
 Or from source:
 ```bash
-git clone https://github.com/zevaverbach/tinytrack.git
-cd tinytrack
+git clone https://github.com/zevaverbach/tiny-analytics.git
+cd tiny-analytics
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
-tinytrack
+tiny-analytics
 ```
 </details>
 
@@ -96,12 +96,12 @@ No cookies. No localStorage. No tracking across sites.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TINYTRACK_PASSWORD` | `changeme` | Dashboard login password |
-| `TINYTRACK_SECRET_KEY` | `change-this...` | Session signing key (generate a random string) |
-| `TINYTRACK_ALLOWED_ORIGINS` | `[]` | Restrict tracking to specific domains (empty = allow all) |
-| `TINYTRACK_DB_PATH` | `./tinytrack.db` | SQLite database location |
-| `TINYTRACK_HOST` | `0.0.0.0` | Host to bind to |
-| `TINYTRACK_PORT` | `8000` | Port to listen on |
+| `TINY_ANALYTICS_PASSWORD` | `changeme` | Dashboard login password |
+| `TINY_ANALYTICS_SECRET_KEY` | `change-this...` | Session signing key (generate a random string) |
+| `TINY_ANALYTICS_ALLOWED_ORIGINS` | `[]` | Restrict tracking to specific domains (empty = allow all) |
+| `TINY_ANALYTICS_DB_PATH` | `./tiny_analytics.db` | SQLite database location |
+| `TINY_ANALYTICS_HOST` | `0.0.0.0` | Host to bind to |
+| `TINY_ANALYTICS_PORT` | `8000` | Port to listen on |
 
 ## Deployment
 
@@ -109,15 +109,15 @@ No cookies. No localStorage. No tracking across sites.
 
 ```ini
 [Unit]
-Description=tinytrack
+Description=tiny-analytics
 After=network.target
 
 [Service]
 User=www-data
-WorkingDirectory=/opt/tinytrack
-Environment="TINYTRACK_PASSWORD=your-password"
-Environment="TINYTRACK_SECRET_KEY=your-secret-key"
-ExecStart=/usr/local/bin/tinytrack
+WorkingDirectory=/opt/tiny-analytics
+Environment="TINY_ANALYTICS_PASSWORD=your-password"
+Environment="TINY_ANALYTICS_SECRET_KEY=your-secret-key"
+ExecStart=/usr/local/bin/tiny-analytics
 Restart=always
 
 [Install]
@@ -137,12 +137,12 @@ location / {
 
 ### Cloudflare
 
-tinytrack reads `cf-connecting-ip` and `cf-ipcountry` headers automatically for accurate geo and IP data behind Cloudflare.
+tiny-analytics reads `cf-connecting-ip` and `cf-ipcountry` headers automatically for accurate geo and IP data behind Cloudflare.
 
 ## CLI Options
 
 ```
-tinytrack [OPTIONS]
+tiny-analytics [OPTIONS]
 
 Options:
   --host TEXT     Host to bind to [default: 0.0.0.0]

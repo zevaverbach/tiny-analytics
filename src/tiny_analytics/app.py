@@ -90,15 +90,15 @@ def get_country(request: Request) -> str | None:
 # ---------------------------------------------------------------------------
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env")
-    tinytrack_password: str = "changeme"
-    tinytrack_secret_key: str = "change-this-to-a-random-string"
-    tinytrack_allowed_origins: list[str] = []
-    tinytrack_db_path: str = str(BASE_DIR / "tinytrack.db")
+    model_config = SettingsConfigDict(env_file=".env", env_prefix="TINY_ANALYTICS_", extra="ignore")
+    password: str = "changeme"
+    secret_key: str = "change-this-to-a-random-string"
+    allowed_origins: list[str] = []
+    db_path: str = str(BASE_DIR / "tiny_analytics.db")
 
 
 settings = Settings()
-signer = URLSafeSerializer(settings.tinytrack_secret_key, salt="tinytrack")
+signer = URLSafeSerializer(settings.secret_key, salt="tiny_analytics")
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +106,7 @@ signer = URLSafeSerializer(settings.tinytrack_secret_key, salt="tinytrack")
 # ---------------------------------------------------------------------------
 
 def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(settings.tinytrack_db_path)
+    conn = sqlite3.connect(settings.db_path)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -155,10 +155,10 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="tinytrack", lifespan=lifespan)
+app = FastAPI(title="tiny-analytics", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.tinytrack_allowed_origins or ["*"],
+    allow_origins=settings.allowed_origins or ["*"],
     allow_methods=["POST"],
     allow_headers=["Content-Type"],
 )
@@ -215,11 +215,11 @@ def get_real_ip(request: Request) -> str:
 
 @app.post("/t", status_code=204)
 async def track(hit: Hit, request: Request):
-    if settings.tinytrack_allowed_origins:
+    if settings.allowed_origins:
         origin = request.headers.get("origin") or request.headers.get("referer", "")
         parsed = urlparse(origin)
         request_origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme else ""
-        if request_origin not in settings.tinytrack_allowed_origins:
+        if request_origin not in settings.allowed_origins:
             return Response(status_code=403)
 
     ip = get_real_ip(request)
@@ -306,7 +306,7 @@ async def login_page(request: Request):
 
 @app.post("/login")
 async def login(password: Annotated[str, Form()]):
-    if password != settings.tinytrack_password:
+    if password != settings.password:
         raise HTTPException(status_code=401, detail="Wrong password")
     token = signer.dumps("authenticated")
     resp = RedirectResponse("/", status_code=303)
