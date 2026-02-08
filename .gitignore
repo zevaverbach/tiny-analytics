@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+tinytrack.db
+.venv/
+*.egg-info/
+dist/
