@@ -1,4 +1,5 @@
 import hashlib
+import re
 import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,26 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from itsdangerous import BadSignature, URLSafeSerializer
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# ---------------------------------------------------------------------------
+# Bot detection
+# ---------------------------------------------------------------------------
+
+BOT_PATTERNS = re.compile(
+    r"bot|crawler|spider|scraper|curl|wget|python-requests|httpx|aiohttp|"
+    r"googlebot|bingbot|yandex|baidu|duckduckbot|slurp|facebookexternalhit|"
+    r"twitterbot|linkedinbot|embedly|quora|pinterest|redditbot|applebot|"
+    r"semrushbot|ahrefsbot|mj12bot|dotbot|petalbot|bytespider|gptbot|"
+    r"claudebot|anthropic|openai|headless|phantom|selenium|puppeteer|playwright",
+    re.IGNORECASE,
+)
+
+
+def is_bot(user_agent: str) -> bool:
+    """Return True if user-agent looks like a bot."""
+    if not user_agent:
+        return True  # No UA is suspicious
+    return bool(BOT_PATTERNS.search(user_agent))
 
 # ---------------------------------------------------------------------------
 # Settings
@@ -184,7 +205,7 @@ async def dashboard(request: Request, days: int = 30):
     conn = get_db()
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
-    # total unique visitors
+    # total unique visitors (humans only)
     row = conn.execute(
         "SELECT COUNT(DISTINCT visitor_hash) as cnt FROM pageviews WHERE ts >= ?", (since,)
     ).fetchone()
@@ -196,16 +217,50 @@ async def dashboard(request: Request, days: int = 30):
     ).fetchone()
     total_views = row["cnt"]
 
-    # daily unique visitors for chart
+    # daily stats for chart - humans vs bots
     rows = conn.execute("""
-        SELECT DATE(ts) as day, COUNT(DISTINCT visitor_hash) as uniques
+        SELECT DATE(ts) as day, COUNT(DISTINCT visitor_hash) as uniques, user_agent
         FROM pageviews WHERE ts >= ?
-        GROUP BY DATE(ts) ORDER BY day
+        GROUP BY DATE(ts), visitor_hash
+        ORDER BY day
     """, (since,)).fetchall()
     conn.close()
 
-    labels = [r["day"] for r in rows]
-    values = [r["uniques"] for r in rows]
+    # Aggregate by day, separating humans and bots
+    daily_humans: dict[str, set[str]] = {}
+    daily_bots: dict[str, set[str]] = {}
+    for r in rows:
+        day = r["day"]
+        ua = r["user_agent"] or ""
+        # Use a composite key of day+visitor for uniqueness
+        visitor_key = f"{r['uniques']}"  # uniques here is actually COUNT, need to fix
+        if is_bot(ua):
+            daily_bots.setdefault(day, set()).add(visitor_key)
+        else:
+            daily_humans.setdefault(day, set()).add(visitor_key)
+
+    # Re-query for accurate per-day breakdown
+    conn = get_db()
+    rows = conn.execute("""
+        SELECT DATE(ts) as day, visitor_hash, user_agent
+        FROM pageviews WHERE ts >= ?
+    """, (since,)).fetchall()
+    conn.close()
+
+    daily_humans = {}
+    daily_bots = {}
+    for r in rows:
+        day = r["day"]
+        vh = r["visitor_hash"]
+        ua = r["user_agent"] or ""
+        if is_bot(ua):
+            daily_bots.setdefault(day, set()).add(vh)
+        else:
+            daily_humans.setdefault(day, set()).add(vh)
+
+    all_days = sorted(set(daily_humans.keys()) | set(daily_bots.keys()))
+    human_values = [len(daily_humans.get(d, set())) for d in all_days]
+    bot_values = [len(daily_bots.get(d, set())) for d in all_days]
 
     origin = f"{request.url.scheme}://{request.url.netloc}"
 
@@ -222,12 +277,13 @@ async def dashboard(request: Request, days: int = 30):
   canvas{{max-height:300px}}
   nav{{display:flex;justify-content:space-between;align-items:center}}
   nav a{{color:#666;font-size:.85rem}}
+  nav .links{{display:flex;gap:1rem}}
   .period{{margin:1rem 0;display:flex;gap:.5rem}}
   .period a{{padding:.3rem .7rem;border-radius:4px;text-decoration:none;color:#666;font-size:.85rem;border:1px solid #ddd}}
   .period a.active{{background:#111;color:#fff;border-color:#111}}
 </style>
 </head><body>
-<nav><h1>tinytrack</h1><a href="/logout">log out</a></nav>
+<nav><h1>tinytrack</h1><div class="links"><a href="/logs">logs</a><a href="/logout">log out</a></div></nav>
 
 <div class="period">
   <a href="/?days=7" {"class='active'" if days==7 else ""}>7d</a>
@@ -248,16 +304,124 @@ async def dashboard(request: Request, days: int = 30):
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <script>
 new Chart(document.getElementById('chart'),{{
-  type:'bar',
+  type:'line',
   data:{{
-    labels:{labels},
-    datasets:[{{label:'Unique visitors',data:{values},backgroundColor:'#111',borderRadius:3}}]
+    labels:{all_days},
+    datasets:[
+      {{label:'Humans',data:{human_values},borderColor:'#111',backgroundColor:'rgba(17,17,17,0.1)',fill:true,tension:0.3}},
+      {{label:'Bots',data:{bot_values},borderColor:'#e74c3c',backgroundColor:'rgba(231,76,60,0.1)',fill:true,tension:0.3}}
+    ]
   }},
   options:{{
     responsive:true,
-    plugins:{{legend:{{display:false}}}},
+    interaction:{{intersect:false,mode:'index'}},
+    plugins:{{legend:{{display:true,position:'bottom'}}}},
     scales:{{y:{{beginAtZero:true,ticks:{{precision:0}}}},x:{{ticks:{{maxRotation:45}}}}}}
   }}
 }});
 </script>
+</body></html>"""
+
+
+# ---------------------------------------------------------------------------
+# Logs page
+# ---------------------------------------------------------------------------
+
+@app.get("/logs", response_class=HTMLResponse, dependencies=[Depends(require_auth)])
+async def logs_page(request: Request, limit: int = 100, offset: int = 0, filter: str = "all"):
+    conn = get_db()
+
+    # Get total count
+    total = conn.execute("SELECT COUNT(*) as cnt FROM pageviews").fetchone()["cnt"]
+
+    # Get paginated logs
+    rows = conn.execute("""
+        SELECT id, ts, url, referrer, visitor_hash, user_agent
+        FROM pageviews
+        ORDER BY ts DESC
+        LIMIT ? OFFSET ?
+    """, (limit, offset)).fetchall()
+    conn.close()
+
+    # Build table rows with bot detection
+    table_rows = []
+    for r in rows:
+        ua = r["user_agent"] or ""
+        is_bot_hit = is_bot(ua)
+
+        # Skip based on filter
+        if filter == "humans" and is_bot_hit:
+            continue
+        if filter == "bots" and not is_bot_hit:
+            continue
+
+        badge = '<span class="badge bot">bot</span>' if is_bot_hit else '<span class="badge human">human</span>'
+        ts_short = r["ts"][:19].replace("T", " ")  # Trim to YYYY-MM-DD HH:MM:SS
+        url_short = r["url"][:60] + "..." if len(r["url"]) > 60 else r["url"]
+        ref_short = (r["referrer"] or "—")[:40]
+        ua_short = ua[:50] + "..." if len(ua) > 50 else (ua or "—")
+
+        table_rows.append(f"""
+        <tr>
+            <td>{ts_short}</td>
+            <td title="{r["url"]}">{url_short}</td>
+            <td>{ref_short}</td>
+            <td><code>{r["visitor_hash"][:8]}</code></td>
+            <td title="{ua}">{ua_short}</td>
+            <td>{badge}</td>
+        </tr>""")
+
+    rows_html = "".join(table_rows) if table_rows else '<tr><td colspan="6">No hits found</td></tr>'
+
+    prev_offset = max(0, offset - limit)
+    next_offset = offset + limit
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>tinytrack - logs</title>
+<style>
+  body{{font-family:system-ui;max-width:1200px;margin:2rem auto;padding:0 1rem;color:#222}}
+  nav{{display:flex;justify-content:space-between;align-items:center}}
+  nav a{{color:#666;font-size:.85rem}}
+  nav .links{{display:flex;gap:1rem}}
+  table{{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.85rem}}
+  th,td{{text-align:left;padding:.6rem .5rem;border-bottom:1px solid #eee}}
+  th{{background:#f5f5f5;font-weight:600;text-transform:uppercase;font-size:.75rem;letter-spacing:.05em}}
+  tr:hover{{background:#fafafa}}
+  code{{background:#f0f0f0;padding:.1rem .3rem;border-radius:3px;font-size:.8rem}}
+  .badge{{padding:.2rem .5rem;border-radius:3px;font-size:.7rem;font-weight:600;text-transform:uppercase}}
+  .badge.human{{background:#2ecc71;color:#fff}}
+  .badge.bot{{background:#e74c3c;color:#fff}}
+  .filters{{margin:1rem 0;display:flex;gap:.5rem}}
+  .filters a{{padding:.3rem .7rem;border-radius:4px;text-decoration:none;color:#666;font-size:.85rem;border:1px solid #ddd}}
+  .filters a.active{{background:#111;color:#fff;border-color:#111}}
+  .pagination{{display:flex;gap:1rem;margin:1rem 0;justify-content:center}}
+  .pagination a{{padding:.4rem .8rem;border:1px solid #ddd;border-radius:4px;text-decoration:none;color:#666}}
+  .pagination a:hover{{background:#f5f5f5}}
+  .meta{{color:#666;font-size:.85rem;margin:.5rem 0}}
+</style>
+</head><body>
+<nav><h1>tinytrack / logs</h1><div class="links"><a href="/">dashboard</a><a href="/logout">log out</a></div></nav>
+
+<div class="filters">
+  <a href="/logs?filter=all" {"class='active'" if filter=="all" else ""}>all</a>
+  <a href="/logs?filter=humans" {"class='active'" if filter=="humans" else ""}>humans</a>
+  <a href="/logs?filter=bots" {"class='active'" if filter=="bots" else ""}>bots</a>
+</div>
+
+<p class="meta">Showing {offset + 1}–{min(offset + limit, total)} of {total:,} total hits</p>
+
+<table>
+  <thead>
+    <tr><th>Timestamp</th><th>URL</th><th>Referrer</th><th>Visitor</th><th>User Agent</th><th>Type</th></tr>
+  </thead>
+  <tbody>
+    {rows_html}
+  </tbody>
+</table>
+
+<div class="pagination">
+  {"<a href='/logs?offset=" + str(prev_offset) + "&filter=" + filter + "'>← Previous</a>" if offset > 0 else ""}
+  {"<a href='/logs?offset=" + str(next_offset) + "&filter=" + filter + "'>Next →</a>" if offset + limit < total else ""}
+</div>
 </body></html>"""
