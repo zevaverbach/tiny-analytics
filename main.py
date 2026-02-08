@@ -100,14 +100,16 @@ def init_db():
             country TEXT
         )
     """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ts ON pageviews(ts)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_visitor ON pageviews(visitor_hash)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_country ON pageviews(country)")
-    # Migration: add country column if missing
+    # Migration: add country column if missing (must happen before index creation)
     cursor = conn.execute("PRAGMA table_info(pageviews)")
     columns = [row[1] for row in cursor.fetchall()]
     if "country" not in columns:
         conn.execute("ALTER TABLE pageviews ADD COLUMN country TEXT")
+        conn.commit()
+    # Create indexes
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ts ON pageviews(ts)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_visitor ON pageviews(visitor_hash)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_country ON pageviews(country)")
     conn.commit()
     conn.close()
 
