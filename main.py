@@ -22,18 +22,17 @@ class Settings(BaseSettings):
     tinytrack_password: str = "changeme"
     tinytrack_secret_key: str = "change-this-to-a-random-string"
     tinytrack_allowed_origins: list[str] = []  # e.g. ["https://example.com", "https://blog.example.com"]
+    tinytrack_db_path: str = str(Path(__file__).parent / "tinytrack.db")
 
 settings = Settings()
 signer = URLSafeSerializer(settings.tinytrack_secret_key, salt="tinytrack")
-
-DB_PATH = Path(__file__).parent / "tinytrack.db"
 
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
 
 def get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(settings.tinytrack_db_path)
     conn.row_factory = sqlite3.Row
     return conn
 
