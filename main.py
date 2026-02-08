@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
 
+import geoip2.database
+import geoip2.errors
 from fastapi import Cookie, Depends, FastAPI, Form, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -33,6 +35,33 @@ def is_bot(user_agent: str) -> bool:
     if not user_agent:
         return True  # No UA is suspicious
     return bool(BOT_PATTERNS.search(user_agent))
+
+
+# ---------------------------------------------------------------------------
+# GeoIP
+# ---------------------------------------------------------------------------
+
+GEOIP_DB_PATH = Path(__file__).parent / "data" / "dbip-country.mmdb"
+_geoip_reader: geoip2.database.Reader | None = None
+
+
+def get_geoip_reader() -> geoip2.database.Reader | None:
+    global _geoip_reader
+    if _geoip_reader is None and GEOIP_DB_PATH.exists():
+        _geoip_reader = geoip2.database.Reader(str(GEOIP_DB_PATH))
+    return _geoip_reader
+
+
+def lookup_country(ip: str) -> str | None:
+    """Return 2-letter country code for IP, or None if unknown."""
+    reader = get_geoip_reader()
+    if not reader:
+        return None
+    try:
+        resp = reader.country(ip)
+        return resp.country.iso_code
+    except (geoip2.errors.AddressNotFoundError, ValueError):
+        return None
 
 # ---------------------------------------------------------------------------
 # Settings
@@ -67,11 +96,18 @@ def init_db():
             url TEXT NOT NULL,
             referrer TEXT,
             visitor_hash TEXT NOT NULL,
-            user_agent TEXT
+            user_agent TEXT,
+            country TEXT
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ts ON pageviews(ts)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_visitor ON pageviews(visitor_hash)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_country ON pageviews(country)")
+    # Migration: add country column if missing
+    cursor = conn.execute("PRAGMA table_info(pageviews)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if "country" not in columns:
+        conn.execute("ALTER TABLE pageviews ADD COLUMN country TEXT")
     conn.commit()
     conn.close()
 
@@ -118,6 +154,20 @@ def require_auth(session: Annotated[str | None, Cookie(alias="tt_session")] = No
 # Tracking endpoint  (called by the snippet)
 # ---------------------------------------------------------------------------
 
+def get_real_ip(request: Request) -> str:
+    """Extract real client IP, handling Cloudflare/proxy headers."""
+    # Cloudflare-specific header
+    cf_ip = request.headers.get("cf-connecting-ip")
+    if cf_ip:
+        return cf_ip
+    # Standard proxy header
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    # Direct connection
+    return request.client.host if request.client else "unknown"
+
+
 @app.post("/t", status_code=204)
 async def track(hit: Hit, request: Request):
     if settings.tinytrack_allowed_origins:
@@ -128,14 +178,15 @@ async def track(hit: Hit, request: Request):
         if request_origin not in settings.tinytrack_allowed_origins:
             return Response(status_code=403)
 
-    ip = request.client.host if request.client else "unknown"
+    ip = get_real_ip(request)
     ua = request.headers.get("user-agent", "")
     visitor_hash = hashlib.sha256(f"{ip}:{ua}".encode()).hexdigest()[:16]
+    country = lookup_country(ip)
 
     conn = get_db()
     conn.execute(
-        "INSERT INTO pageviews (ts, url, referrer, visitor_hash, user_agent) VALUES (?, ?, ?, ?, ?)",
-        (datetime.now(timezone.utc).isoformat(), hit.url, hit.referrer, visitor_hash, ua),
+        "INSERT INTO pageviews (ts, url, referrer, visitor_hash, user_agent, country) VALUES (?, ?, ?, ?, ?, ?)",
+        (datetime.now(timezone.utc).isoformat(), hit.url, hit.referrer, visitor_hash, ua, country),
     )
     conn.commit()
     conn.close()
@@ -200,12 +251,29 @@ async def logout():
 # Dashboard
 # ---------------------------------------------------------------------------
 
-@app.get("/", response_class=HTMLResponse, dependencies=[Depends(require_auth)])
-async def dashboard(request: Request, days: int = 30):
-    conn = get_db()
-    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+def bucket_timestamp(ts_str: str, interval: str) -> str:
+    """Bucket a timestamp string into the specified interval."""
+    # Parse ISO timestamp
+    dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+    if interval == "15m":
+        minute = (dt.minute // 15) * 15
+        return dt.strftime(f"%Y-%m-%d %H:{minute:02d}")
+    elif interval == "1h":
+        return dt.strftime("%Y-%m-%d %H:00")
+    else:  # 1d
+        return dt.strftime("%Y-%m-%d")
 
-    # total unique visitors (humans only)
+
+@app.get("/", response_class=HTMLResponse, dependencies=[Depends(require_auth)])
+async def dashboard(request: Request, hours: int = 24, interval: str = "1h"):
+    # Validate interval
+    if interval not in ("15m", "1h", "1d"):
+        interval = "1h"
+
+    conn = get_db()
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+    # total unique visitors
     row = conn.execute(
         "SELECT COUNT(DISTINCT visitor_hash) as cnt FROM pageviews WHERE ts >= ?", (since,)
     ).fetchone()
@@ -217,78 +285,92 @@ async def dashboard(request: Request, days: int = 30):
     ).fetchone()
     total_views = row["cnt"]
 
-    # daily stats for chart - humans vs bots
+    # Get all pageviews for bucketing
     rows = conn.execute("""
-        SELECT DATE(ts) as day, COUNT(DISTINCT visitor_hash) as uniques, user_agent
-        FROM pageviews WHERE ts >= ?
-        GROUP BY DATE(ts), visitor_hash
-        ORDER BY day
-    """, (since,)).fetchall()
-    conn.close()
-
-    # Aggregate by day, separating humans and bots
-    daily_humans: dict[str, set[str]] = {}
-    daily_bots: dict[str, set[str]] = {}
-    for r in rows:
-        day = r["day"]
-        ua = r["user_agent"] or ""
-        # Use a composite key of day+visitor for uniqueness
-        visitor_key = f"{r['uniques']}"  # uniques here is actually COUNT, need to fix
-        if is_bot(ua):
-            daily_bots.setdefault(day, set()).add(visitor_key)
-        else:
-            daily_humans.setdefault(day, set()).add(visitor_key)
-
-    # Re-query for accurate per-day breakdown
-    conn = get_db()
-    rows = conn.execute("""
-        SELECT DATE(ts) as day, visitor_hash, user_agent
+        SELECT ts, visitor_hash, user_agent, country
         FROM pageviews WHERE ts >= ?
     """, (since,)).fetchall()
+
+    # Top countries
+    country_counts: dict[str, int] = {}
+    for r in rows:
+        c = r["country"] or "Unknown"
+        country_counts[c] = country_counts.get(c, 0) + 1
+    top_countries = sorted(country_counts.items(), key=lambda x: -x[1])[:5]
+
     conn.close()
 
-    daily_humans = {}
-    daily_bots = {}
+    # Bucket by interval, separating humans and bots
+    bucket_humans: dict[str, set[str]] = {}
+    bucket_bots: dict[str, set[str]] = {}
     for r in rows:
-        day = r["day"]
+        bucket = bucket_timestamp(r["ts"], interval)
         vh = r["visitor_hash"]
         ua = r["user_agent"] or ""
         if is_bot(ua):
-            daily_bots.setdefault(day, set()).add(vh)
+            bucket_bots.setdefault(bucket, set()).add(vh)
         else:
-            daily_humans.setdefault(day, set()).add(vh)
+            bucket_humans.setdefault(bucket, set()).add(vh)
 
-    all_days = sorted(set(daily_humans.keys()) | set(daily_bots.keys()))
-    human_values = [len(daily_humans.get(d, set())) for d in all_days]
-    bot_values = [len(daily_bots.get(d, set())) for d in all_days]
+    all_buckets = sorted(set(bucket_humans.keys()) | set(bucket_bots.keys()))
+    human_values = [len(bucket_humans.get(b, set())) for b in all_buckets]
+    bot_values = [len(bucket_bots.get(b, set())) for b in all_buckets]
+
+    # Format labels based on interval
+    if interval == "1d":
+        labels = all_buckets  # Already YYYY-MM-DD
+    else:
+        # Show just time for sub-day intervals
+        labels = [b.split(" ")[1] if " " in b else b for b in all_buckets]
 
     origin = f"{request.url.scheme}://{request.url.netloc}"
+
+    # Build country stats HTML
+    country_html = "".join(
+        f'<span class="country">{c} <b>{n}</b></span>' for c, n in top_countries
+    ) if top_countries else '<span class="country">No data yet</span>'
 
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>tinytrack</title>
 <style>
-  body{{font-family:system-ui;max-width:800px;margin:2rem auto;padding:0 1rem;color:#222}}
-  .stats{{display:flex;gap:2rem;margin:1.5rem 0}}
-  .stat{{background:#f5f5f5;padding:1.2rem 1.5rem;border-radius:8px;flex:1}}
-  .stat h3{{margin:0 0 .3rem;font-size:.85rem;color:#666;text-transform:uppercase;letter-spacing:.05em}}
-  .stat .num{{font-size:2rem;font-weight:700}}
+  body{{font-family:system-ui;max-width:900px;margin:2rem auto;padding:0 1rem;color:#222}}
+  .stats{{display:flex;gap:1rem;margin:1.5rem 0;flex-wrap:wrap}}
+  .stat{{background:#f5f5f5;padding:1rem 1.2rem;border-radius:8px;flex:1;min-width:120px}}
+  .stat h3{{margin:0 0 .3rem;font-size:.75rem;color:#666;text-transform:uppercase;letter-spacing:.05em}}
+  .stat .num{{font-size:1.8rem;font-weight:700}}
   .snippet-box{{background:#f5f5f5;padding:1rem;border-radius:8px;margin:1.5rem 0;font-family:monospace;font-size:.85rem;word-break:break-all}}
   canvas{{max-height:300px}}
   nav{{display:flex;justify-content:space-between;align-items:center}}
   nav a{{color:#666;font-size:.85rem}}
   nav .links{{display:flex;gap:1rem}}
-  .period{{margin:1rem 0;display:flex;gap:.5rem}}
-  .period a{{padding:.3rem .7rem;border-radius:4px;text-decoration:none;color:#666;font-size:.85rem;border:1px solid #ddd}}
-  .period a.active{{background:#111;color:#fff;border-color:#111}}
+  .controls{{margin:1rem 0;display:flex;gap:2rem;flex-wrap:wrap}}
+  .control-group{{display:flex;gap:.5rem;align-items:center}}
+  .control-group label{{font-size:.8rem;color:#666;text-transform:uppercase}}
+  .control-group a{{padding:.3rem .7rem;border-radius:4px;text-decoration:none;color:#666;font-size:.85rem;border:1px solid #ddd}}
+  .control-group a.active{{background:#111;color:#fff;border-color:#111}}
+  .countries{{margin:1rem 0}}
+  .countries h3{{font-size:.85rem;color:#666;margin:0 0 .5rem}}
+  .country{{display:inline-block;background:#f5f5f5;padding:.3rem .6rem;border-radius:4px;margin:.2rem;font-size:.85rem}}
+  .country b{{margin-left:.3rem}}
 </style>
 </head><body>
 <nav><h1>tinytrack</h1><div class="links"><a href="/logs">logs</a><a href="/logout">log out</a></div></nav>
 
-<div class="period">
-  <a href="/?days=7" {"class='active'" if days==7 else ""}>7d</a>
-  <a href="/?days=30" {"class='active'" if days==30 else ""}>30d</a>
-  <a href="/?days=90" {"class='active'" if days==90 else ""}>90d</a>
+<div class="controls">
+  <div class="control-group">
+    <label>Period:</label>
+    <a href="/?hours=6&interval={interval}" {"class='active'" if hours==6 else ""}>6h</a>
+    <a href="/?hours=24&interval={interval}" {"class='active'" if hours==24 else ""}>24h</a>
+    <a href="/?hours=168&interval={interval}" {"class='active'" if hours==168 else ""}>7d</a>
+    <a href="/?hours=720&interval={interval}" {"class='active'" if hours==720 else ""}>30d</a>
+  </div>
+  <div class="control-group">
+    <label>Interval:</label>
+    <a href="/?hours={hours}&interval=15m" {"class='active'" if interval=="15m" else ""}>15m</a>
+    <a href="/?hours={hours}&interval=1h" {"class='active'" if interval=="1h" else ""}>1h</a>
+    <a href="/?hours={hours}&interval=1d" {"class='active'" if interval=="1d" else ""}>1d</a>
+  </div>
 </div>
 
 <div class="stats">
@@ -298,6 +380,11 @@ async def dashboard(request: Request, days: int = 30):
 
 <canvas id="chart"></canvas>
 
+<div class="countries">
+  <h3>Top Countries</h3>
+  {country_html}
+</div>
+
 <h3>Embed this on your site</h3>
 <div class="snippet-box">&lt;script src="{origin}/snippet.js" defer&gt;&lt;/script&gt;</div>
 
@@ -306,17 +393,17 @@ async def dashboard(request: Request, days: int = 30):
 new Chart(document.getElementById('chart'),{{
   type:'line',
   data:{{
-    labels:{all_days},
+    labels:{labels},
     datasets:[
-      {{label:'Humans',data:{human_values},borderColor:'#111',backgroundColor:'rgba(17,17,17,0.1)',fill:true,tension:0.3}},
-      {{label:'Bots',data:{bot_values},borderColor:'#e74c3c',backgroundColor:'rgba(231,76,60,0.1)',fill:true,tension:0.3}}
+      {{label:'Humans',data:{human_values},borderColor:'#111',backgroundColor:'rgba(17,17,17,0.1)',fill:true,tension:0.3,pointRadius:2}},
+      {{label:'Bots',data:{bot_values},borderColor:'#e74c3c',backgroundColor:'rgba(231,76,60,0.1)',fill:true,tension:0.3,pointRadius:2}}
     ]
   }},
   options:{{
     responsive:true,
     interaction:{{intersect:false,mode:'index'}},
     plugins:{{legend:{{display:true,position:'bottom'}}}},
-    scales:{{y:{{beginAtZero:true,ticks:{{precision:0}}}},x:{{ticks:{{maxRotation:45}}}}}}
+    scales:{{y:{{beginAtZero:true,ticks:{{precision:0}}}},x:{{ticks:{{maxRotation:45,autoSkip:true,maxTicksLimit:24}}}}}}
   }}
 }});
 </script>
@@ -336,7 +423,7 @@ async def logs_page(request: Request, limit: int = 100, offset: int = 0, filter:
 
     # Get paginated logs
     rows = conn.execute("""
-        SELECT id, ts, url, referrer, visitor_hash, user_agent
+        SELECT id, ts, url, referrer, visitor_hash, user_agent, country
         FROM pageviews
         ORDER BY ts DESC
         LIMIT ? OFFSET ?
@@ -360,18 +447,20 @@ async def logs_page(request: Request, limit: int = 100, offset: int = 0, filter:
         url_short = r["url"][:60] + "..." if len(r["url"]) > 60 else r["url"]
         ref_short = (r["referrer"] or "—")[:40]
         ua_short = ua[:50] + "..." if len(ua) > 50 else (ua or "—")
+        country = r["country"] or "—"
 
         table_rows.append(f"""
         <tr>
             <td>{ts_short}</td>
             <td title="{r["url"]}">{url_short}</td>
             <td>{ref_short}</td>
+            <td>{country}</td>
             <td><code>{r["visitor_hash"][:8]}</code></td>
             <td title="{ua}">{ua_short}</td>
             <td>{badge}</td>
         </tr>""")
 
-    rows_html = "".join(table_rows) if table_rows else '<tr><td colspan="6">No hits found</td></tr>'
+    rows_html = "".join(table_rows) if table_rows else '<tr><td colspan="7">No hits found</td></tr>'
 
     prev_offset = max(0, offset - limit)
     next_offset = offset + limit
@@ -413,7 +502,7 @@ async def logs_page(request: Request, limit: int = 100, offset: int = 0, filter:
 
 <table>
   <thead>
-    <tr><th>Timestamp</th><th>URL</th><th>Referrer</th><th>Visitor</th><th>User Agent</th><th>Type</th></tr>
+    <tr><th>Timestamp</th><th>URL</th><th>Referrer</th><th>Country</th><th>Visitor</th><th>User Agent</th><th>Type</th></tr>
   </thead>
   <tbody>
     {rows_html}

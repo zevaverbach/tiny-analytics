@@ -207,10 +207,14 @@ class TestDashboard:
 
     def test_period_links(self):
         resp = client.get("/", cookies=_auth_cookies())
-        assert "?days=7" in resp.text
-        assert "?days=30" in resp.text
-        assert "?days=90" in resp.text
+        assert "?hours=6" in resp.text
+        assert "?hours=24" in resp.text
+        assert "?hours=168" in resp.text
 
-    def test_days_param_accepted(self):
-        resp = client.get("/?days=7", cookies=_auth_cookies())
+    def test_hours_param_accepted(self):
+        resp = client.get("/?hours=6", cookies=_auth_cookies())
+        assert resp.status_code == 200
+
+    def test_interval_param_accepted(self):
+        resp = client.get("/?hours=24&interval=15m", cookies=_auth_cookies())
         assert resp.status_code == 200
