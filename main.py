@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlparse
 
 from fastapi import Cookie, Depends, FastAPI, Form, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +21,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env")
     tinytrack_password: str = "changeme"
     tinytrack_secret_key: str = "change-this-to-a-random-string"
+    tinytrack_allowed_origins: list[str] = []  # e.g. ["https://example.com", "https://blog.example.com"]
 
 settings = Settings()
 signer = URLSafeSerializer(settings.tinytrack_secret_key, salt="tinytrack")
@@ -64,7 +66,12 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(title="tinytrack", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["POST"], allow_headers=["Content-Type"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.tinytrack_allowed_origins or ["*"],
+    allow_methods=["POST"],
+    allow_headers=["Content-Type"],
+)
 
 # ---------------------------------------------------------------------------
 # Models
@@ -93,6 +100,14 @@ def require_auth(session: Annotated[str | None, Cookie(alias="tt_session")] = No
 
 @app.post("/t", status_code=204)
 async def track(hit: Hit, request: Request):
+    if settings.tinytrack_allowed_origins:
+        origin = request.headers.get("origin") or request.headers.get("referer", "")
+        # Strip path from referer to get just the origin
+        parsed = urlparse(origin)
+        request_origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme else ""
+        if request_origin not in settings.tinytrack_allowed_origins:
+            return Response(status_code=403)
+
     ip = request.client.host if request.client else "unknown"
     ua = request.headers.get("user-agent", "")
     visitor_hash = hashlib.sha256(f"{ip}:{ua}".encode()).hexdigest()[:16]
