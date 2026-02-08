@@ -1,6 +1,6 @@
 import pytest
 
-from main import init_db, settings
+from tinytrack.app import init_db, settings
 
 
 @pytest.fixture(autouse=True)

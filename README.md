@@ -7,18 +7,15 @@ Minimal, privacy-focused web analytics. Self-hosted, no cookies, no tracking IDs
 ## Quick Start
 
 ```bash
-# Clone and setup
-git clone https://github.com/zevaverbach/tinytrack.git
-cd tinytrack
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+# Install
+uv tool install tinytrack
 
-# Configure
-cp .env.example .env
-# Edit .env: set TINYTRACK_PASSWORD and TINYTRACK_SECRET_KEY
+# Configure (create a .env file or set environment variables)
+export TINYTRACK_PASSWORD="your-secret-password"
+export TINYTRACK_SECRET_KEY="$(openssl rand -hex 32)"
 
 # Run
-uvicorn main:app --host 0.0.0.0 --port 8000
+tinytrack
 ```
 
 Add this to your site:
@@ -26,14 +23,47 @@ Add this to your site:
 <script src="https://your-tinytrack-domain/snippet.js" defer></script>
 ```
 
-That's it. View your dashboard at `https://your-tinytrack-domain/`.
+That's it. View your dashboard at `http://localhost:8000/`.
+
+### One-liner (no install)
+
+```bash
+uvx tinytrack
+```
+
+### From source
+
+```bash
+git clone https://github.com/zevaverbach/tinytrack.git
+cd tinytrack
+uv sync
+uv run tinytrack
+```
+
+<details>
+<summary>Using pip instead of uv</summary>
+
+```bash
+pip install tinytrack
+tinytrack
+```
+
+Or from source:
+```bash
+git clone https://github.com/zevaverbach/tinytrack.git
+cd tinytrack
+python -m venv .venv && source .venv/bin/activate
+pip install -e .
+tinytrack
+```
+</details>
 
 ---
 
 ## Features
 
 - **Privacy-first**: No cookies, no fingerprinting, no personal data stored
-- **Lightweight**: Single ~18KB Python file + templates
+- **Lightweight**: Single Python file + templates
 - **Bot filtering**: Automatic detection and separation of bot traffic
 - **Time on page**: Tracks actual engagement, not just page loads
 - **Geo & device breakdown**: See where your visitors come from and what they use
@@ -70,6 +100,8 @@ No cookies. No localStorage. No tracking across sites.
 | `TINYTRACK_SECRET_KEY` | `change-this...` | Session signing key (generate a random string) |
 | `TINYTRACK_ALLOWED_ORIGINS` | `[]` | Restrict tracking to specific domains (empty = allow all) |
 | `TINYTRACK_DB_PATH` | `./tinytrack.db` | SQLite database location |
+| `TINYTRACK_HOST` | `0.0.0.0` | Host to bind to |
+| `TINYTRACK_PORT` | `8000` | Port to listen on |
 
 ## Deployment
 
@@ -83,8 +115,9 @@ After=network.target
 [Service]
 User=www-data
 WorkingDirectory=/opt/tinytrack
-Environment="PATH=/opt/tinytrack/.venv/bin"
-ExecStart=/opt/tinytrack/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+Environment="TINYTRACK_PASSWORD=your-password"
+Environment="TINYTRACK_SECRET_KEY=your-secret-key"
+ExecStart=/usr/local/bin/tinytrack
 Restart=always
 
 [Install]
@@ -105,6 +138,17 @@ location / {
 ### Cloudflare
 
 tinytrack reads `cf-connecting-ip` and `cf-ipcountry` headers automatically for accurate geo and IP data behind Cloudflare.
+
+## CLI Options
+
+```
+tinytrack [OPTIONS]
+
+Options:
+  --host TEXT     Host to bind to [default: 0.0.0.0]
+  --port INTEGER  Port to listen on [default: 8000]
+  --help          Show this message and exit
+```
 
 ## API
 

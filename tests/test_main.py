@@ -2,7 +2,7 @@ import hashlib
 
 from fastapi.testclient import TestClient
 
-from main import app, get_db, settings, signer
+from tinytrack.app import app, get_db, settings, signer
 
 
 client = TestClient(app)
